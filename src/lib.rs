@@ -1,11 +1,46 @@
+//! A Rust library for creating MJPEG AVI files.
+//!
+//! This library provides a simple interface for creating AVI files from a sequence of JPEG frames.
+//! It supports both synchronous and asynchronous writers.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use mjpeg_avi_rs::{MjpegAviWriter, MjpegWriter};
+//! use std::fs::File;
+//!
+//! fn main() -> mjpeg_avi_rs::Result<()> {
+//!     let mut file = File::create("output.avi")?;
+//!     let mut writer = MjpegWriter::new(file, 320, 240, 30)?;
+//!
+//!     // Add a single frame
+//!     let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0]; // Example JPEG data
+//!     writer.add_frame(&jpeg_data)?;
+//!
+//!     // Add a frame from multiple chunks
+//!     let jpeg_part1 = vec![0xFF, 0xD8];
+//!     let jpeg_part2 = vec![0xFF, 0xE0];
+//!     writer.add_frame_vectored(&[&jpeg_part1, &jpeg_part2])?;
+//!
+//!     writer.finish()?;
+//!     Ok(())
+//! }
+//! ```
+
 use std::fmt;
 
+/// The error type for MJPEG AVI operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MjpegError {
+    /// An I/O error occurred.
     Io(String),
+    /// The AVI file size limit (2GB) was exceeded.
     FileSizeExceeded,
+    /// The frame count limit was exceeded.
     FrameCountExceeded,
+    /// A single frame's size exceeds the `u32` limit.
     FrameSizeExceeded,
+    /// The provided frame data is invalid (e.g., empty).
     InvalidFrameSize,
 }
 
@@ -27,6 +62,7 @@ impl From<std::io::Error> for MjpegError {
     }
 }
 
+/// A `Result` alias for MJPEG AVI operations.
 pub type Result<T> = core::result::Result<T, MjpegError>;
 
 mod common;
@@ -56,12 +92,12 @@ mod tests {
         
         let mut img: RgbImage = ImageBuffer::new(width, height);
         
-        // まず全ピクセルを白にセット
+        // First, set all pixels to white
         for pixel in img.pixels_mut() {
-            *pixel = Rgb([255, 255, 255]); // 白背景
+            *pixel = Rgb([255, 255, 255]); // White background
         }
         
-        // 赤い円を描画
+        // Draw a red circle
         let center_y = height / 2;
         let radius = 20i32;
         
@@ -72,17 +108,17 @@ mod tests {
                 let distance_squared = dx * dx + dy * dy;
                 
                 if distance_squared <= (radius * radius) {
-                    img.put_pixel(x, y, Rgb([255, 0, 0])); // 赤色
+                    img.put_pixel(x, y, Rgb([255, 0, 0])); // Red color
                 }
             }
         }
         
-        // JPEG形式で低品質でエンコード（カメラっぽく）
+        // Encode as JPEG with low quality (like a camera)
         let mut buffer = Vec::new();
         {
             let dynamic_img = DynamicImage::ImageRgb8(img);
             let mut cursor = Cursor::new(&mut buffer);
-            // より低い品質でエンコード
+            // Encode with lower quality
             dynamic_img.write_to(&mut cursor, ImageFormat::Jpeg).unwrap();
         }
         
@@ -96,7 +132,7 @@ mod tests {
         let fps = 30;
         let frame_count = 120;
         
-        // テスト用ディレクトリを作成
+        // Create a test directory
         let temp_dir = std::path::Path::new("target/test_output");
         std::fs::create_dir_all(&temp_dir).unwrap();
         
@@ -105,7 +141,7 @@ mod tests {
         
         let mut writer = MjpegWriter::new(cursor, width, height, fps).unwrap();
         
-        // 120フレームの動画を作成（赤い円が左から右に移動）
+        // Create a 120-frame video (red circle moving from left to right)
         for frame in 0..frame_count {
             let circle_x = (frame * (width - 40)) / (frame_count - 1);
             let jpeg_data = create_test_jpeg(width, height, circle_x);
@@ -114,14 +150,14 @@ mod tests {
         
         writer.finish().unwrap();
         
-        // 結果を一時ディレクトリに保存
+        // Save the result to a temporary directory
         let output_path = temp_dir.join("test_output.avi");
         std::fs::write(&output_path, &output).unwrap();
         
-        // 基本的なサイズチェック
+        // Basic size check
         assert!(output.len() > 1000);
         
-        // AVIヘッダーの確認
+        // Check AVI header
         assert_eq!(&output[0..4], b"RIFF");
         assert_eq!(&output[8..12], b"AVI ");
         
@@ -129,6 +165,32 @@ mod tests {
         println!("Video: {}x{} @ {}fps, {} frames", width, height, fps, frame_count);
     }
     
+    #[test]
+    fn test_vectored_write() {
+        let width = 320;
+        let height = 240;
+        let fps = 30;
+
+        let jpeg_data = create_test_jpeg(width, height, 100);
+        let (part1, part2) = jpeg_data.split_at(jpeg_data.len() / 2);
+
+        // Vectored write
+        let mut output_vectored = Vec::new();
+        let cursor_vectored = Cursor::new(&mut output_vectored);
+        let mut writer_vectored = MjpegWriter::new(cursor_vectored, width, height, fps).unwrap();
+        writer_vectored.add_frame_vectored(&[part1, part2]).unwrap();
+        writer_vectored.finish().unwrap();
+
+        // Single write
+        let mut output_single = Vec::new();
+        let cursor_single = Cursor::new(&mut output_single);
+        let mut writer_single = MjpegWriter::new(cursor_single, width, height, fps).unwrap();
+        writer_single.add_frame(&jpeg_data).unwrap();
+        writer_single.finish().unwrap();
+
+        assert_eq!(output_vectored, output_single);
+    }
+
     #[test]
     fn test_empty_frame_error() {
         let mut output = Vec::new();
