@@ -148,7 +148,7 @@ mod tests {
             writer.add_frame(&jpeg_data).unwrap();
         }
         
-        let mut output = writer.finish().unwrap().into_inner();
+        let output = writer.finish().unwrap().into_inner();
         
         // Save the result to a temporary directory
         let output_path = temp_dir.join("test_output.avi");
