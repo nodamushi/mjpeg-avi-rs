@@ -1,8 +1,4 @@
-use std::io::{Write, Seek, SeekFrom};
 use std::fmt;
-
-const MAX_AVI_FILE_SIZE: u64 = 2_147_483_648 - 1; // 2GB - 1 (AVI RIFF limit)
-const MAX_FRAME_COUNT: u32 = 1_000_000; // 実用的な上限
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MjpegError {
@@ -33,265 +29,22 @@ impl From<std::io::Error> for MjpegError {
 
 pub type Result<T> = core::result::Result<T, MjpegError>;
 
-pub trait MjpegAviWriter {
-    fn add_frame(&mut self, jpeg_binary: &[u8]) -> Result<()>;
-    fn finish(&mut self) -> Result<()>;
-}
+mod common;
+mod writer;
+mod mjpeg_sync;
 
-pub struct MjpegWriter<W: Write + Seek> {
-    writer: W,
-    frame_sizes: Vec<u32>,
-    jpeg_total_size: u64,
-    estimated_file_size: u64,
-}
+#[cfg(any(feature = "async", feature = "tokio"))]
+mod mjpeg_async;
 
-impl<W: Write + Seek> MjpegWriter<W> {
-    pub fn new(mut writer: W, width: u32, height: u32, fps: u32) -> Result<Self> {
-        if fps == 0 {
-            return Err(MjpegError::InvalidFrameSize);
-        }
-        
-        create_header_data(&mut writer, fps, width, height)?;
-        
-        Ok(MjpegWriter {
-            writer,
-            frame_sizes: Vec::new(),
-            jpeg_total_size: 0,
-            estimated_file_size: 256, // ヘッダーサイズ
-        })
-    }
-    
-    fn check_limits(&self, frame_size: usize) -> Result<()> {
-        // フレーム数制限チェック
-        if self.frame_sizes.len() >= MAX_FRAME_COUNT as usize {
-            return Err(MjpegError::FrameCountExceeded);
-        }
-        
-        // フレームサイズがu32に収まるかチェック
-        if frame_size > u32::MAX as usize {
-            return Err(MjpegError::FrameSizeExceeded);
-        }
-        
-        // 推定ファイルサイズチェック
-        let padded_size = if frame_size % 2 == 1 { frame_size + 1 } else { frame_size };
-        let new_frame_data_size = 8 + padded_size; // chunk header + data
-        let new_index_size = 16; // index entry size
-        let estimated_new_size = self.estimated_file_size + new_frame_data_size as u64 + new_index_size;
-        
-        if estimated_new_size > MAX_AVI_FILE_SIZE {
-            return Err(MjpegError::FileSizeExceeded);
-        }
-        
-        Ok(())
-    }
-}
+// Re-export public API
+pub use writer::{Writer};
+pub use mjpeg_sync::{MjpegAviWriter, MjpegWriter};
 
-impl<W: Write + Seek> MjpegAviWriter for MjpegWriter<W> {
-    fn add_frame(&mut self, jpeg_binary: &[u8]) -> Result<()> {
-        if jpeg_binary.is_empty() {
-            return Err(MjpegError::InvalidFrameSize);
-        }
-        
-        self.check_limits(jpeg_binary.len())?;
-        
-        let frame_size = jpeg_binary.len();
-        let odd = frame_size % 2 == 1;
-        let padded_size = if odd { frame_size + 1 } else { frame_size };
-        let padded_size_u32 = padded_size as u32; // check_limits で確認済み
-        
-        // チャンクヘッダー + データを一括書き込み
-        let mut chunk = [0u8; 8];
-        chunk[0..4].copy_from_slice(b"00dc");
-        chunk[4..8].copy_from_slice(&padded_size_u32.to_le_bytes());
-        
-        self.writer.write_all(&chunk)?;
-        self.writer.write_all(jpeg_binary)?;
-        
-        if odd {
-            self.writer.write_all(&[0u8])?;
-        }
+#[cfg(any(feature = "async", feature = "tokio"))]
+pub use writer::AsyncWriter;
+#[cfg(any(feature = "async", feature = "tokio"))]
+pub use mjpeg_async::{MjpegAviWriterAsync, MjpegAsyncWriter};
 
-        self.frame_sizes.push(padded_size_u32);
-        self.jpeg_total_size += padded_size as u64;
-        self.estimated_file_size += 8 + padded_size as u64 + 16; // chunk + index entry
-        
-        Ok(())
-    }
-
-    fn finish(&mut self) -> Result<()> {
-        let frame_count = self.frame_sizes.len();
-        
-        // フレーム数がu32に収まることを確認
-        if frame_count > u32::MAX as usize {
-            return Err(MjpegError::FrameCountExceeded);
-        }
-        let frame_count_u32 = frame_count as u32;
-        
-        // インデックスサイズがオーバーフローしないかチェック
-        let index_size = frame_count_u32.checked_mul(16)
-            .ok_or(MjpegError::FileSizeExceeded)?;
-        
-        // idx1 チャンクヘッダーを書き込み
-        let mut idx_header = [0u8; 8];
-        idx_header[0..4].copy_from_slice(b"idx1");
-        idx_header[4..8].copy_from_slice(&index_size.to_le_bytes());
-        self.writer.write_all(&idx_header)?;
-        
-        // インデックステーブルを構築
-        let mut offset = 4u32;
-        for &size in &self.frame_sizes {
-            let mut entry = [0u8; 16];
-            entry[0..4].copy_from_slice(b"00dc");
-            entry[4..8].copy_from_slice(&0x10u32.to_le_bytes()); // flags
-            entry[8..12].copy_from_slice(&offset.to_le_bytes());
-            entry[12..16].copy_from_slice(&size.to_le_bytes());
-            
-            self.writer.write_all(&entry)?;
-            
-            offset = offset.checked_add(8)
-                .and_then(|o| o.checked_add(size))
-                .ok_or(MjpegError::FileSizeExceeded)?;
-        }
-
-        // ファイルサイズ計算（Python版と同じ計算方法）
-        let header_size = 256u64;
-        let total_file_size = header_size
-            .checked_add(self.jpeg_total_size)
-            .and_then(|s| s.checked_add(frame_count as u64 * (8 + 16))) // frame chunks + index entries
-            .ok_or(MjpegError::FileSizeExceeded)?;
-            
-        if total_file_size > u32::MAX as u64 {
-            return Err(MjpegError::FileSizeExceeded);
-        }
-        
-        let movi_size = 4u64
-            .checked_add(self.jpeg_total_size)
-            .and_then(|s| s.checked_add(frame_count as u64 * 8))
-            .ok_or(MjpegError::FileSizeExceeded)?;
-            
-        if movi_size > u32::MAX as u64 {
-            return Err(MjpegError::FileSizeExceeded);
-        }
-        
-        // サイズ値を一括で書き込み
-        let sizes = [
-            (4, (total_file_size as u32).to_le_bytes()),      // RIFFファイルサイズ
-            (48, frame_count_u32.to_le_bytes()),              // totalframes
-            (140, frame_count_u32.to_le_bytes()),             // length
-            (240, frame_count_u32.to_le_bytes()),             // odml totalframes  
-            (248, (movi_size as u32).to_le_bytes()),          // moviサイズ
-        ];
-        
-        for (pos, bytes) in sizes {
-            self.writer.seek(SeekFrom::Start(pos))?;
-            self.writer.write_all(&bytes)?;
-        }
-        
-        Ok(())
-    }
-}
-
-const AVI_HEADER_TEMPLATE: [u8; 256] = [
-    // RIFF header
-    b'R', b'I', b'F', b'F',
-    0, 0, 0, 0,  // file size placeholder (4-7)
-    b'A', b'V', b'I', b' ',
-    
-    // hdrl LIST
-    b'L', b'I', b'S', b'T',
-    224, 0, 0, 0,  // hdrl list size
-    b'h', b'd', b'r', b'l',
-    
-    // avih chunk
-    b'a', b'v', b'i', b'h',
-    56, 0, 0, 0,   // avih size
-    0, 0, 0, 0,    // microsec/frame placeholder (32-35)
-    88, 27, 0, 0,  // maxbytespersec (7000)
-    0, 0, 0, 0,    // paddinggranularity
-    16, 0, 0, 0,   // flags (0x10)
-    0, 0, 0, 0,    // totalframes placeholder (48-51)
-    0, 0, 0, 0,    // initialframes
-    1, 0, 0, 0,    // streams
-    0, 0, 0, 0,    // suggestedBufferSize
-    0, 0, 0, 0,    // width placeholder (64-67)
-    0, 0, 0, 0,    // height placeholder (68-71)
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // reserved
-    
-    // strl LIST
-    b'L', b'I', b'S', b'T',
-    148, 0, 0, 0,  // strl list size
-    b's', b't', b'r', b'l',
-    
-    // strh chunk
-    b's', b't', b'r', b'h',
-    64, 0, 0, 0,   // strh size
-    b'v', b'i', b'd', b's',
-    b'M', b'J', b'P', b'G',
-    0, 0, 0, 0,    // flags
-    0, 0,          // priority
-    0, 0,          // language
-    0, 0, 0, 0,    // initialframes
-    1, 0, 0, 0,    // scale
-    0, 0, 0, 0,    // rate placeholder (128-131)
-    0, 0, 0, 0,    // start
-    0, 0, 0, 0,    // length placeholder (140-143)
-    0, 0, 0, 0,    // suggestedBufferSize
-    0, 0, 0, 0,    // quality
-    0, 0, 0, 0,    // sampleSize
-    0, 0, 0, 0,    // left
-    0, 0, 0, 0,    // top
-    0, 0, 0, 0,    // width placeholder (164-167)
-    0, 0, 0, 0,    // height placeholder (168-171)
-    
-    // strf chunk (bitmap info)
-    b's', b't', b'r', b'f',
-    40, 0, 0, 0,   // strf size
-    40, 0, 0, 0,   // biSize
-    0, 0, 0, 0,    // biWidth placeholder (184-187)
-    0, 0, 0, 0,    // biHeight placeholder (188-191)
-    1, 0,          // biPlanes
-    24, 0,         // biBitCount
-    b'M', b'J', b'P', b'G',
-    0, 0, 0, 0,    // biSizeImage placeholder (200-203)
-    0, 0, 0, 0,    // biXPelsPerMeter
-    0, 0, 0, 0,    // biYPelsPerMeter
-    0, 0, 0, 0,    // biClrUsed
-    0, 0, 0, 0,    // biClrImportant
-
-    // odml LIST
-    b'L', b'I', b'S', b'T',
-    16, 0, 0, 0,   // odml list size
-    b'o', b'd', b'm', b'l',
-    b'd', b'm', b'l', b'h',
-    4, 0, 0, 0,    // dmlh size
-    0, 0, 0, 0,    // totalframes placeholder (240-243)
-
-    // movi LIST
-    b'L', b'I', b'S', b'T',
-    0, 0, 0, 0,    // movi size placeholder (248-251)
-    b'm', b'o', b'v', b'i',
-];
-
-fn create_header_data<W: Write>(writer: &mut W, fps: u32, width: u32, height: u32) -> Result<()> {
-    let microsec = 1_000_000 / fps;
-    let bi_size_image = ((width * 24 / 8 + 3) & 0xFFFFFFFC) * height;
-    
-    let mut header = AVI_HEADER_TEMPLATE;
-    
-    // 動的な値のみ更新
-    header[32..36].copy_from_slice(&microsec.to_le_bytes());
-    header[64..68].copy_from_slice(&width.to_le_bytes());
-    header[68..72].copy_from_slice(&height.to_le_bytes());
-    header[128..132].copy_from_slice(&fps.to_le_bytes());
-    header[164..168].copy_from_slice(&width.to_le_bytes());
-    header[168..172].copy_from_slice(&height.to_le_bytes());
-    header[184..188].copy_from_slice(&width.to_le_bytes());
-    header[188..192].copy_from_slice(&height.to_le_bytes());
-    header[200..204].copy_from_slice(&bi_size_image.to_le_bytes());
-    
-    writer.write_all(&header)?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -324,19 +77,6 @@ mod tests {
             }
         }
         
-        // デバッグ用：最初のフレームの詳細をチェック
-        if circle_x == 0 {
-            println!("First frame: {}x{}, circle at x={}", width, height, circle_x);
-            // 背景色をチェック
-            let bg_pixel = img.get_pixel(10, 10);
-            println!("Background pixel at (10,10): {:?}", bg_pixel);
-            // 円の位置をチェック
-            if circle_x < width {
-                let circle_pixel = img.get_pixel(circle_x, center_y);
-                println!("Circle pixel at ({},{}): {:?}", circle_x, center_y, circle_pixel);
-            }
-        }
-        
         // JPEG形式で低品質でエンコード（カメラっぽく）
         let mut buffer = Vec::new();
         {
@@ -344,29 +84,6 @@ mod tests {
             let mut cursor = Cursor::new(&mut buffer);
             // より低い品質でエンコード
             dynamic_img.write_to(&mut cursor, ImageFormat::Jpeg).unwrap();
-        }
-        
-        // デバッグ用：JPEGファイルの確認
-        if circle_x == 0 {
-            println!("JPEG buffer size: {}", buffer.len());
-            
-            // JPEGヘッダーの詳細確認
-            println!("JPEG header: {:02x?}", &buffer[0..std::cmp::min(20, buffer.len())]);
-            if buffer.len() >= 4 {
-                if &buffer[0..2] == &[0xFF, 0xD8] {
-                    println!("Valid JPEG SOI marker found");
-                } else {
-                    println!("WARNING: Invalid JPEG SOI marker: {:02x?}", &buffer[0..2]);
-                }
-            }
-            if buffer.len() >= 2 {
-                let end = &buffer[buffer.len()-2..];
-                if end == &[0xFF, 0xD9] {
-                    println!("Valid JPEG EOI marker found");
-                } else {
-                    println!("WARNING: Invalid JPEG EOI marker: {:02x?}", end);
-                }
-            }
         }
         
         buffer
@@ -392,14 +109,6 @@ mod tests {
         for frame in 0..frame_count {
             let circle_x = (frame * (width - 40)) / (frame_count - 1);
             let jpeg_data = create_test_jpeg(width, height, circle_x);
-            
-            // 最初と最後の数フレームをデバッグ用に保存
-            if frame < 3 || frame >= frame_count - 3 {
-                let frame_filename = temp_dir.join(format!("frame_{:03}.jpg", frame));
-                std::fs::write(&frame_filename, &jpeg_data).unwrap();
-                println!("Saved debug frame: {:?}", frame_filename);
-            }
-            
             writer.add_frame(&jpeg_data).unwrap();
         }
         
@@ -418,7 +127,6 @@ mod tests {
         
         println!("Created test video: {:?} ({} bytes)", output_path, output.len());
         println!("Video: {}x{} @ {}fps, {} frames", width, height, fps, frame_count);
-        println!("Debug frames and video saved in: {:?}", temp_dir);
     }
     
     #[test]
@@ -438,7 +146,51 @@ mod tests {
         let result = MjpegWriter::new(cursor, 320, 240, 0);
         assert!(matches!(result, Err(MjpegError::InvalidFrameSize)));
     }
-    
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn test_async_sync_compatibility() {
+        use futures_executor::block_on;
+        use futures::io::Cursor as AsyncCursor;
+        
+        let width = 320;
+        let height = 240;
+        let fps = 30;
+        
+        // Create test JPEG
+        let jpeg_data = create_test_jpeg(width, height, 100);
+        
+        // Sync version
+        let mut sync_output = Vec::new();
+        let sync_cursor = Cursor::new(&mut sync_output);
+        let mut sync_writer = MjpegWriter::new(sync_cursor, width, height, fps).unwrap();
+        sync_writer.add_frame(&jpeg_data).unwrap();
+        sync_writer.finish().unwrap();
+        
+        // Async version
+        let async_output = block_on(async {
+            let mut output = Vec::new();
+            let async_cursor = AsyncCursor::new(&mut output);
+            let mut async_writer = MjpegAsyncWriter::new(async_cursor, width, height, fps).await.unwrap();
+            async_writer.add_frame(&jpeg_data).await.unwrap();
+            async_writer.finish().await.unwrap();
+            output
+        });
+        
+        // Save async output to file for inspection
+        let temp_dir = std::path::Path::new("target/test_output");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let async_output_path = temp_dir.join("async_compatibility_test.avi");
+        std::fs::write(&async_output_path, &async_output).unwrap();
+        
+        // Verify outputs are identical
+        assert_eq!(sync_output, async_output);
+        assert!(sync_output.len() > 1000);
+        
+        // Verify AVI headers are identical
+        assert_eq!(&sync_output[0..4], b"RIFF");
+        assert_eq!(&async_output[0..4], b"RIFF");
+        assert_eq!(&sync_output[8..12], b"AVI ");
+        assert_eq!(&async_output[8..12], b"AVI ");
+    }
 }
-
-
