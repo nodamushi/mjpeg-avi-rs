@@ -83,3 +83,7 @@ async fn create_async_video() -> mjpeg_avi_rs::Result<()> {
 -   `default`: No features are enabled by default, providing only the synchronous API.
 -   `async`: Enables the `futures`-based asynchronous API (`MjpegAsyncWriter`).
 -   `tokio`: Enables `tokio`-specific integrations for the asynchronous API.
+
+## Acknowledgements
+
+This project is a Rust port of the C library [mjpeg-avi](https://github.com/Ricardicus/mjpeg-avi/blob/master/src/avi.c) by Ricardicus. The core logic for structuring the AVI file is based on this original work.
