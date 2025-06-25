@@ -8,7 +8,7 @@ use std::future::Future;
 
 /// A trait for asynchronously writing MJPEG AVI files.
 #[cfg(any(feature = "async", feature = "tokio"))]
-pub trait MjpegAviWriterAsync {
+pub trait MjpegAviWriterAsync<W: AsyncWriter> {
     /// Asynchronously adds a single JPEG frame to the AVI file.
     ///
     /// The `jpeg_binary` should be a complete JPEG file binary.
@@ -22,9 +22,8 @@ pub trait MjpegAviWriterAsync {
 
     /// Asynchronously finalizes the AVI file.
     ///
-    /// This method writes the index chunk and updates the AVI header with the final
-    /// file size and frame count. It must be called after all frames have been added.
-    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send;
+    /// This method consumes the writer and must be called to finalize the AVI file.
+    fn finish(self) -> impl Future<Output = Result<W>> + Send where Self: Sized;
 }
 
 /// An asynchronous writer for creating MJPEG AVI files.
@@ -105,7 +104,7 @@ impl<W: AsyncWriter> MjpegAsyncWriter<W> {
 }
 
 #[cfg(any(feature = "async", feature = "tokio"))]
-impl<W: AsyncWriter> MjpegAviWriterAsync for MjpegAsyncWriter<W> {
+impl<W: AsyncWriter> MjpegAviWriterAsync<W> for MjpegAsyncWriter<W> {
     async fn add_frame(&mut self, jpeg_binary: &[u8]) -> Result<()> {
         self.add_frame_vectored(&[jpeg_binary]).await
     }
@@ -143,7 +142,7 @@ impl<W: AsyncWriter> MjpegAviWriterAsync for MjpegAsyncWriter<W> {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<()> {
+    async fn finish(mut self) -> Result<W> {
         let frame_count = self.frame_sizes.len();
         
         let file_sizes = calculate_file_sizes(&self.frame_sizes, self.jpeg_total_size)?;
@@ -176,6 +175,6 @@ impl<W: AsyncWriter> MjpegAviWriterAsync for MjpegAsyncWriter<W> {
             self.writer.write_all(&bytes).await?;
         }
         
-        Ok(())
+        Ok(self.writer)
     }
 }

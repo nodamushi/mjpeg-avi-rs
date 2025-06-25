@@ -4,7 +4,7 @@ use crate::common::*;
 use crate::writer::Writer;
 
 /// A trait for synchronously writing MJPEG AVI files.
-pub trait MjpegAviWriter {
+pub trait MjpegAviWriter<W: Writer> {
     /// Adds a single JPEG frame to the AVI file.
     ///
     /// The `jpeg_binary` should be a complete JPEG file binary.
@@ -18,9 +18,8 @@ pub trait MjpegAviWriter {
 
     /// Finalizes the AVI file.
     ///
-    /// This method writes the index chunk and updates the AVI header with the final
-    /// file size and frame count. It must be called after all frames have been added.
-    fn finish(&mut self) -> Result<()>;
+    /// This method consumes the writer and must be called to finalize the AVI file.
+    fn finish(self) -> Result<W>;
 }
 
 /// A synchronous writer for creating MJPEG AVI files.
@@ -86,7 +85,7 @@ impl<W: Writer> MjpegWriter<W> {
     }
 }
 
-impl<W: Writer> MjpegAviWriter for MjpegWriter<W> {
+impl<W: Writer> MjpegAviWriter<W> for MjpegWriter<W> {
     fn add_frame(&mut self, jpeg_binary: &[u8]) -> Result<()> {
         self.add_frame_vectored(&[jpeg_binary])
     }
@@ -124,7 +123,7 @@ impl<W: Writer> MjpegAviWriter for MjpegWriter<W> {
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<()> {
+    fn finish(mut self) -> Result<W> {
         let frame_count = self.frame_sizes.len();
 
         // Calculate file sizes
@@ -161,7 +160,7 @@ impl<W: Writer> MjpegAviWriter for MjpegWriter<W> {
             self.writer.write_all(&bytes)?;
         }
 
-        Ok(())
+        Ok(self.writer)
     }
 }
 

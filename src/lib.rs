@@ -148,7 +148,7 @@ mod tests {
             writer.add_frame(&jpeg_data).unwrap();
         }
         
-        writer.finish().unwrap();
+        let mut output = writer.finish().unwrap().into_inner();
         
         // Save the result to a temporary directory
         let output_path = temp_dir.join("test_output.avi");
@@ -179,14 +179,14 @@ mod tests {
         let cursor_vectored = Cursor::new(&mut output_vectored);
         let mut writer_vectored = MjpegWriter::new(cursor_vectored, width, height, fps).unwrap();
         writer_vectored.add_frame_vectored(&[part1, part2]).unwrap();
-        writer_vectored.finish().unwrap();
+        let output_vectored = writer_vectored.finish().unwrap().into_inner();
 
         // Single write
         let mut output_single = Vec::new();
         let cursor_single = Cursor::new(&mut output_single);
         let mut writer_single = MjpegWriter::new(cursor_single, width, height, fps).unwrap();
         writer_single.add_frame(&jpeg_data).unwrap();
-        writer_single.finish().unwrap();
+        let output_single = writer_single.finish().unwrap().into_inner();
 
         assert_eq!(output_vectored, output_single);
     }
@@ -227,7 +227,7 @@ mod tests {
         let sync_cursor = Cursor::new(&mut sync_output);
         let mut sync_writer = MjpegWriter::new(sync_cursor, width, height, fps).unwrap();
         sync_writer.add_frame(&jpeg_data).unwrap();
-        sync_writer.finish().unwrap();
+        let sync_output = sync_writer.finish().unwrap().into_inner();
         
         // Async version
         let async_output = block_on(async {
@@ -235,8 +235,8 @@ mod tests {
             let async_cursor = AsyncCursor::new(&mut output);
             let mut async_writer = MjpegAsyncWriter::new(async_cursor, width, height, fps).await.unwrap();
             async_writer.add_frame(&jpeg_data).await.unwrap();
-            async_writer.finish().await.unwrap();
-            output
+            let mut async_cursor = async_writer.finish().await.unwrap();
+            async_cursor.into_inner()
         });
         
         // Save async output to file for inspection
