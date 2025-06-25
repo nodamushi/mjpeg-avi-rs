@@ -31,6 +31,7 @@ pub trait MjpegAviWriterAsync {
 ///
 /// This struct implements the `MjpegAviWriterAsync` trait and provides a high-level
 /// interface for creating AVI files asynchronously.
+#[must_use = "The writer must be finalized using .finish() to produce a valid AVI file"]
 #[cfg(any(feature = "async", feature = "tokio"))]
 pub struct MjpegAsyncWriter<W: AsyncWriter> {
     writer: W,

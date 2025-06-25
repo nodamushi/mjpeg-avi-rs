@@ -27,6 +27,7 @@ pub trait MjpegAviWriter {
 ///
 /// This struct implements the `MjpegAviWriter` trait and provides a high-level
 /// interface for creating AVI files.
+#[must_use = "The writer must be finalized using .finish() to produce a valid AVI file"]
 pub struct MjpegWriter<W: Writer> {
     writer: W,
     frame_sizes: Vec<u32>,
