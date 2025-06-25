@@ -191,91 +191,103 @@ impl<W: Write + Seek> MjpegAviWriter for MjpegWriter<W> {
     }
 }
 
+const AVI_HEADER_TEMPLATE: [u8; 256] = [
+    // RIFF header
+    b'R', b'I', b'F', b'F',
+    0, 0, 0, 0,  // file size placeholder (4-7)
+    b'A', b'V', b'I', b' ',
+    
+    // hdrl LIST
+    b'L', b'I', b'S', b'T',
+    224, 0, 0, 0,  // hdrl list size
+    b'h', b'd', b'r', b'l',
+    
+    // avih chunk
+    b'a', b'v', b'i', b'h',
+    56, 0, 0, 0,   // avih size
+    0, 0, 0, 0,    // microsec/frame placeholder (32-35)
+    88, 27, 0, 0,  // maxbytespersec (7000)
+    0, 0, 0, 0,    // paddinggranularity
+    16, 0, 0, 0,   // flags (0x10)
+    0, 0, 0, 0,    // totalframes placeholder (48-51)
+    0, 0, 0, 0,    // initialframes
+    1, 0, 0, 0,    // streams
+    0, 0, 0, 0,    // suggestedBufferSize
+    0, 0, 0, 0,    // width placeholder (64-67)
+    0, 0, 0, 0,    // height placeholder (68-71)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // reserved
+    
+    // strl LIST
+    b'L', b'I', b'S', b'T',
+    148, 0, 0, 0,  // strl list size
+    b's', b't', b'r', b'l',
+    
+    // strh chunk
+    b's', b't', b'r', b'h',
+    64, 0, 0, 0,   // strh size
+    b'v', b'i', b'd', b's',
+    b'M', b'J', b'P', b'G',
+    0, 0, 0, 0,    // flags
+    0, 0,          // priority
+    0, 0,          // language
+    0, 0, 0, 0,    // initialframes
+    1, 0, 0, 0,    // scale
+    0, 0, 0, 0,    // rate placeholder (128-131)
+    0, 0, 0, 0,    // start
+    0, 0, 0, 0,    // length placeholder (140-143)
+    0, 0, 0, 0,    // suggestedBufferSize
+    0, 0, 0, 0,    // quality
+    0, 0, 0, 0,    // sampleSize
+    0, 0, 0, 0,    // left
+    0, 0, 0, 0,    // top
+    0, 0, 0, 0,    // width placeholder (164-167)
+    0, 0, 0, 0,    // height placeholder (168-171)
+    
+    // strf chunk (bitmap info)
+    b's', b't', b'r', b'f',
+    40, 0, 0, 0,   // strf size
+    40, 0, 0, 0,   // biSize
+    0, 0, 0, 0,    // biWidth placeholder (184-187)
+    0, 0, 0, 0,    // biHeight placeholder (188-191)
+    1, 0,          // biPlanes
+    24, 0,         // biBitCount
+    b'M', b'J', b'P', b'G',
+    0, 0, 0, 0,    // biSizeImage placeholder (200-203)
+    0, 0, 0, 0,    // biXPelsPerMeter
+    0, 0, 0, 0,    // biYPelsPerMeter
+    0, 0, 0, 0,    // biClrUsed
+    0, 0, 0, 0,    // biClrImportant
+
+    // odml LIST
+    b'L', b'I', b'S', b'T',
+    16, 0, 0, 0,   // odml list size
+    b'o', b'd', b'm', b'l',
+    b'd', b'm', b'l', b'h',
+    4, 0, 0, 0,    // dmlh size
+    0, 0, 0, 0,    // totalframes placeholder (240-243)
+
+    // movi LIST
+    b'L', b'I', b'S', b'T',
+    0, 0, 0, 0,    // movi size placeholder (248-251)
+    b'm', b'o', b'v', b'i',
+];
+
 fn create_header_data<W: Write>(writer: &mut W, fps: u32, width: u32, height: u32) -> Result<()> {
     let microsec = 1_000_000 / fps;
     let bi_size_image = ((width * 24 / 8 + 3) & 0xFFFFFFFC) * height;
     
-    let mut header = [0u8; 256];
-    let mut pos = 0;
+    let mut header = AVI_HEADER_TEMPLATE;
     
-    // RIFF header
-    header[pos..pos+4].copy_from_slice(b"RIFF"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // file size placeholder
-    header[pos..pos+4].copy_from_slice(b"AVI "); pos += 4;
-    
-    // hdrl LIST
-    header[pos..pos+4].copy_from_slice(b"LIST"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&224u32.to_le_bytes()); pos += 4; // hdrl list size
-    header[pos..pos+4].copy_from_slice(b"hdrl"); pos += 4;
-    
-    // avih chunk
-    header[pos..pos+4].copy_from_slice(b"avih"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&56u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&microsec.to_le_bytes()); pos += 4; // microsec/frame
-    header[pos..pos+4].copy_from_slice(&7000u32.to_le_bytes()); pos += 4; // maxbytespersec
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // paddinggranularity
-    header[pos..pos+4].copy_from_slice(&0x10u32.to_le_bytes()); pos += 4; // flags
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // totalframes placeholder
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // initialframes
-    header[pos..pos+4].copy_from_slice(&1u32.to_le_bytes()); pos += 4; // streams
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // suggestedBufferSize
-    header[pos..pos+4].copy_from_slice(&width.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&height.to_le_bytes()); pos += 4;
-    header[pos..pos+16].fill(0); pos += 16; // reserved
-    
-    // strl LIST
-    header[pos..pos+4].copy_from_slice(b"LIST"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&148u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(b"strl"); pos += 4;
-    
-    // strh chunk
-    header[pos..pos+4].copy_from_slice(b"strh"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&64u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(b"vids"); pos += 4;
-    header[pos..pos+4].copy_from_slice(b"MJPG"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // flags
-    header[pos..pos+2].copy_from_slice(&0u16.to_le_bytes()); pos += 2; // priority
-    header[pos..pos+2].copy_from_slice(&0u16.to_le_bytes()); pos += 2; // language
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // initialframes
-    header[pos..pos+4].copy_from_slice(&1u32.to_le_bytes()); pos += 4; // scale
-    header[pos..pos+4].copy_from_slice(&fps.to_le_bytes()); pos += 4; // rate
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // start
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // length placeholder
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // suggestedBufferSize
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // quality
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // sampleSize
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // left
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // top
-    header[pos..pos+4].copy_from_slice(&width.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&height.to_le_bytes()); pos += 4;
-    
-    // strf chunk (bitmap info)
-    header[pos..pos+4].copy_from_slice(b"strf"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&40u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&40u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&width.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&height.to_le_bytes()); pos += 4;
-    header[pos..pos+2].copy_from_slice(&1u16.to_le_bytes()); pos += 2;
-    header[pos..pos+2].copy_from_slice(&24u16.to_le_bytes()); pos += 2;
-    header[pos..pos+4].copy_from_slice(b"MJPG"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&bi_size_image.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // biXPelsPerMeter
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // biYPelsPerMeter
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // biClrUsed
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // biClrImportant
-
-    // odml LIST
-    header[pos..pos+4].copy_from_slice(b"LIST"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0x10u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(b"odml"); pos += 4;
-    header[pos..pos+4].copy_from_slice(b"dmlh"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&4u32.to_le_bytes()); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4;
-
-    // movi LIST
-    header[pos..pos+4].copy_from_slice(b"LIST"); pos += 4;
-    header[pos..pos+4].copy_from_slice(&0u32.to_le_bytes()); pos += 4; // movi size placeholder
-    header[pos..pos+4].copy_from_slice(b"movi");
+    // 動的な値のみ更新
+    header[32..36].copy_from_slice(&microsec.to_le_bytes());
+    header[64..68].copy_from_slice(&width.to_le_bytes());
+    header[68..72].copy_from_slice(&height.to_le_bytes());
+    header[128..132].copy_from_slice(&fps.to_le_bytes());
+    header[164..168].copy_from_slice(&width.to_le_bytes());
+    header[168..172].copy_from_slice(&height.to_le_bytes());
+    header[184..188].copy_from_slice(&width.to_le_bytes());
+    header[188..192].copy_from_slice(&height.to_le_bytes());
+    header[200..204].copy_from_slice(&bi_size_image.to_le_bytes());
     
     writer.write_all(&header)?;
     Ok(())
